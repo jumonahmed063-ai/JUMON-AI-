@@ -1,0 +1,10 @@
+{
+  "name": "JUMON - AI Voice Assistant",
+  "description": "A sassy, witty, and intelligent BanglaDesh female AI voice assistant.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

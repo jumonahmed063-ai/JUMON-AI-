@@ -1,0 +1,11 @@
+{
+  "appId": "com.mdjumon.app",
+  "appName": "MD JUMON",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}
