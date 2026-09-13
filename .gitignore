@@ -1,8 +1,11 @@
 node_modules/
 build/
+!android/app/build/outputs/apk/debug/app-debug.apk
+!app-debug.apk
 dist/
 coverage/
 .DS_Store
 *.log
 .env*
 !.env.example
+

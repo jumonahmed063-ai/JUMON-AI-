@@ -7,6 +7,7 @@
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "cap:build": "vite build && cap sync android",
+    "cap:apk": "vite build && cap sync android && cd android && ./gradlew assembleDebug",
     "cap:open": "cap open android",
     "preview": "vite preview",
     "clean": "rm -rf dist",

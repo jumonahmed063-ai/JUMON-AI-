@@ -23,6 +23,7 @@ CRITICAL RULES:
 export class LiveSessionManager {
   private ai: GoogleGenAI;
   private sessionPromise: Promise<any> | null = null;
+  private currentSession: any = null;
   private audioContext: AudioContext | null = null;
   private mediaStream: MediaStream | null = null;
   private processor: ScriptProcessorNode | null = null;
@@ -33,10 +34,22 @@ export class LiveSessionManager {
   private nextPlayTime: number = 0;
   private isPlaying: boolean = false;
   public isMuted: boolean = false;
+
+  // Session lifecycle & GoAway handling
+  private isExplicitlyStopped: boolean = false;
+  private isClosingForGoAway: boolean = false;
+  private isReconnecting: boolean = false;
+  private resumptionHandle: string | null = null;
+  private reconnectAttempts: number = 0;
+  private readonly maxReconnectAttempts: number = 5;
+  private reconnectTimeoutId: any = null;
   
   public onStateChange: (state: "idle" | "listening" | "processing" | "speaking") => void = () => {};
   public onMessage: (sender: "user" | "zoya", text: string) => void = () => {};
   public onCommand: (url: string) => void = () => {};
+  public onError: (errorMessage: string) => void = () => {};
+  public onClose: () => void = () => {};
+  public onReconnecting: (reconnecting: boolean) => void = () => {};
 
   constructor() {
     this.ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -44,6 +57,10 @@ export class LiveSessionManager {
 
   async start() {
     try {
+      this.isExplicitlyStopped = false;
+      this.isClosingForGoAway = false;
+      this.isReconnecting = false;
+      this.reconnectAttempts = 0;
       this.onStateChange("processing");
       
       // Initialize Audio Contexts
@@ -66,7 +83,7 @@ export class LiveSessionManager {
       this.processor = this.audioContext.createScriptProcessor(4096, 1, 1);
 
       this.processor.onaudioprocess = (e) => {
-        if (!this.sessionPromise) return;
+        if (!this.sessionPromise || this.isReconnecting || this.isClosingForGoAway || this.isExplicitlyStopped) return;
         const inputData = e.inputBuffer.getChannelData(0);
         const pcm16 = new Int16Array(inputData.length);
         for (let i = 0; i < inputData.length; i++) {
@@ -89,120 +106,272 @@ export class LiveSessionManager {
         const base64Data = btoa(binary);
 
         this.sessionPromise.then(session => {
+          if (this.isReconnecting || this.isClosingForGoAway || this.isExplicitlyStopped) return;
           session.sendRealtimeInput({
             audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
           });
-        }).catch(err => console.error("Error sending audio", err));
+        }).catch(err => {
+          console.warn("Warning sending audio chunk:", err);
+        });
       };
 
       this.source.connect(this.processor);
       this.processor.connect(this.audioContext.destination);
 
       // Connect to Live API
-      this.sessionPromise = this.ai.live.connect({
-        model: "gemini-3.1-flash-live-preview",
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } },
-          },
-          systemInstruction,
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-          tools: [{
-            functionDeclarations: [
-              {
-                name: "executeBrowserAction",
-                description: "Open a website or perform a browser action (like opening YouTube, Spotify, or WhatsApp). Call this when the user asks to open a site, play a song, or send a message.",
-                parameters: {
-                  type: Type.OBJECT,
-                  properties: {
-                    actionType: { type: Type.STRING, description: "Type of action: 'open', 'youtube', 'spotify', 'whatsapp'" },
-                    query: { type: Type.STRING, description: "The search query, website name, or message content." },
-                    target: { type: Type.STRING, description: "The target phone number for WhatsApp, if applicable." }
-                  },
-                  required: ["actionType", "query"]
-                }
-              }
-            ]
-          }]
-        },
-        callbacks: {
-          onopen: () => {
-            console.log("Live API Connected");
-            this.onStateChange("listening");
-          },
-          onmessage: async (message: LiveServerMessage) => {
-            // Handle Audio Output
-            const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-            if (base64Audio) {
-              this.onStateChange("speaking");
-              this.playAudioChunk(base64Audio);
-            }
+      await this.connectLive();
 
-            // Handle Interruption
-            if (message.serverContent?.interrupted) {
-              this.stopPlayback();
-              this.onStateChange("listening");
-            }
-
-            // Handle Transcriptions
-            const userText = message.serverContent?.modelTurn?.parts?.[0]?.text;
-            if (userText) {
-               // Output transcription
-               this.onMessage("zoya", userText);
-            }
-
-            // Handle Function Calls
-            const functionCalls = message.toolCall?.functionCalls;
-            if (functionCalls && functionCalls.length > 0) {
-              for (const call of functionCalls) {
-                if (call.name === "executeBrowserAction") {
-                  const args = call.args as any;
-                  let url = "";
-                  if (args.actionType === "youtube") {
-                    url = `https://www.youtube.com/results?search_query=${encodeURIComponent(args.query)}`;
-                  } else if (args.actionType === "spotify") {
-                    url = `https://open.spotify.com/search/${encodeURIComponent(args.query)}`;
-                  } else if (args.actionType === "whatsapp") {
-                    url = `https://web.whatsapp.com/send?phone=${args.target || ''}&text=${encodeURIComponent(args.query)}`;
-                  } else {
-                    let website = args.query.replace(/\s+/g, "");
-                    if (!website.includes(".")) website += ".com";
-                    url = `https://www.${website}`;
-                  }
-                  
-                  this.onCommand(url);
-                  
-                  // Send tool response
-                  this.sessionPromise?.then(session => {
-                     session.sendToolResponse({
-                       functionResponses: [{
-                         name: call.name,
-                         id: call.id,
-                         response: { result: "Action executed successfully in the browser." }
-                       }]
-                     });
-                  });
-                }
-              }
-            }
-          },
-          onclose: () => {
-            console.log("Live API Closed");
-            this.stop();
-          },
-          onerror: (err) => {
-            console.error("Live API Error:", err);
-            this.stop();
-          }
-        }
-      });
-
-    } catch (error) {
+    } catch (error: any) {
       console.error("Failed to start Live Session:", error);
       this.stop();
       throw error;
+    }
+  }
+
+  private async connectLive(): Promise<any> {
+    if (this.isExplicitlyStopped) return;
+
+    // Build session connect promise
+    const promise = this.ai.live.connect({
+      model: "gemini-3.1-flash-live-preview",
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } },
+        },
+        systemInstruction,
+        inputAudioTranscription: {},
+        outputAudioTranscription: {},
+        // Enable session resumption so tokens are emitted and sessions can resume across reconnections
+        sessionResumption: this.resumptionHandle ? { handle: this.resumptionHandle } : {},
+        // Compress context automatically so audio sessions are not prematurely terminated by token bounds
+        contextWindowCompression: {
+          slidingWindow: {},
+        },
+        tools: [{
+          functionDeclarations: [
+            {
+              name: "executeBrowserAction",
+              description: "Open a website or perform a browser action (like opening YouTube, Spotify, or WhatsApp). Call this when the user asks to open a site, play a song, or send a message.",
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  actionType: { type: Type.STRING, description: "Type of action: 'open', 'youtube', 'spotify', 'whatsapp'" },
+                  query: { type: Type.STRING, description: "The search query, website name, or message content." },
+                  target: { type: Type.STRING, description: "The target phone number for WhatsApp, if applicable." }
+                },
+                required: ["actionType", "query"]
+              }
+            }
+          ]
+        }]
+      },
+      callbacks: {
+        onopen: () => {
+          console.log(
+            "Live API Connected successfully",
+            this.resumptionHandle ? "(Resumed previous session)" : "(New session)"
+          );
+          this.isClosingForGoAway = false;
+          this.isReconnecting = false;
+          this.reconnectAttempts = 0;
+          this.onReconnecting(false);
+          this.onStateChange("listening");
+        },
+        onmessage: async (message: LiveServerMessage) => {
+          // 1. Session Resumption Token handling
+          if (message.sessionResumptionUpdate?.newHandle && message.sessionResumptionUpdate.resumable !== false) {
+            this.resumptionHandle = message.sessionResumptionUpdate.newHandle;
+            console.log("Live API session resumption handle recorded");
+          }
+
+          // 2. GoAway Signal Graceful Handling
+          // The server sends GoAway when session duration reaches limits (~10 min connection limit).
+          // As required by https://ai.google.dev/gemini-api/docs/live-api/session-management#goaway-message
+          // the client MUST gracefully close the connection before it is aborted, and seamlessly resume.
+          if (message.goAway) {
+            const timeLeft = message.goAway.timeLeft || "soon";
+            console.warn(`Live API GoAway signal received from Gemini server. Time left: ${timeLeft}. Closing and resuming session gracefully...`);
+            await this.handleGoAwayGracefully();
+            return;
+          }
+
+          // 3. Audio Output
+          const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+          if (base64Audio) {
+            this.onStateChange("speaking");
+            this.playAudioChunk(base64Audio);
+          }
+
+          // 4. Handle Interruption
+          if (message.serverContent?.interrupted) {
+            this.stopPlayback();
+            this.onStateChange("listening");
+          }
+
+          // 5. Handle Transcriptions
+          const userText = message.serverContent?.modelTurn?.parts?.[0]?.text;
+          if (userText) {
+             this.onMessage("zoya", userText);
+          }
+
+          // 6. Handle Function Calls
+          const functionCalls = message.toolCall?.functionCalls;
+          if (functionCalls && functionCalls.length > 0) {
+            for (const call of functionCalls) {
+              if (call.name === "executeBrowserAction") {
+                const args = call.args as any;
+                let url = "";
+                if (args.actionType === "youtube") {
+                  url = `https://www.youtube.com/results?search_query=${encodeURIComponent(args.query)}`;
+                } else if (args.actionType === "spotify") {
+                  url = `https://open.spotify.com/search/${encodeURIComponent(args.query)}`;
+                } else if (args.actionType === "whatsapp") {
+                  url = `https://web.whatsapp.com/send?phone=${args.target || ''}&text=${encodeURIComponent(args.query)}`;
+                } else {
+                  let website = args.query.replace(/\s+/g, "");
+                  if (!website.includes(".")) website += ".com";
+                  url = `https://www.${website}`;
+                }
+                
+                this.onCommand(url);
+                
+                // Send tool response
+                this.sessionPromise?.then(session => {
+                   session.sendToolResponse({
+                     functionResponses: [{
+                       name: call.name,
+                       id: call.id,
+                       response: { result: "Action executed successfully in the browser." }
+                     }]
+                   });
+                }).catch(err => {
+                   console.warn("Failed to send tool response:", err);
+                });
+              }
+            }
+          }
+        },
+        onclose: (e?: any) => {
+          console.log("Live API Closed", e);
+          if (this.isClosingForGoAway || this.isReconnecting) {
+            // Expected close as part of graceful GoAway migration or reconnect
+            return;
+          }
+          if (this.isExplicitlyStopped) {
+            this.onClose();
+            return;
+          }
+          // Connection closed unexpectedly while active
+          console.warn("Live API connection closed unexpectedly. Initiating auto-reconnect...");
+          this.triggerAutoReconnect();
+        },
+        onerror: (err: any) => {
+          const errMsg = err?.message || String(err || "");
+          console.warn("Live API Error encountered:", errMsg);
+
+          // If the error indicates a GoAway or connection abort, handle it gracefully
+          if (errMsg.includes("GoAway") || errMsg.includes("Connection aborted")) {
+            console.warn("Gracefully recovering from GoAway/connection abort signal...");
+            if (!this.isExplicitlyStopped) {
+              this.handleGoAwayGracefully();
+              return;
+            }
+          }
+
+          if (!this.isExplicitlyStopped && this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.triggerAutoReconnect();
+          } else if (this.isExplicitlyStopped) {
+            this.onClose();
+          } else {
+            this.onError("Voice session disconnected. Tap to restart.");
+            this.stop();
+          }
+        }
+      }
+    });
+
+    this.sessionPromise = promise;
+    const session = await promise;
+    this.currentSession = session;
+    return session;
+  }
+
+  /**
+   * Gracefully handles the GoAway signal per Gemini Live API session-management specifications:
+   * 1. Stops audio transmission to the departing connection.
+   * 2. Closes the current connection immediately to avoid server connection abort.
+   * 3. Seamlessly reconnects using session resumption token to preserve conversation context.
+   */
+  private async handleGoAwayGracefully() {
+    if (this.isExplicitlyStopped) return;
+    this.isClosingForGoAway = true;
+    this.isReconnecting = true;
+    this.onReconnecting(true);
+
+    console.log("Closing current connection in compliance with GoAway protocol...");
+    if (this.currentSession) {
+      try {
+        this.currentSession.close();
+      } catch (err) {
+        console.warn("Note during session.close():", err);
+      }
+      this.currentSession = null;
+    }
+    this.sessionPromise = null;
+
+    // Reconnect immediately to resume the session seamlessly
+    await this.reconnect();
+  }
+
+  private triggerAutoReconnect() {
+    if (this.isExplicitlyStopped || this.isReconnecting) return;
+
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error("Max reconnect attempts reached for Live API.");
+      this.onError("Connection lost. Tap to reconnect.");
+      this.stop();
+      return;
+    }
+
+    this.isReconnecting = true;
+    this.onReconnecting(true);
+    this.reconnectAttempts++;
+
+    const delay = Math.min(800 * Math.pow(1.5, this.reconnectAttempts - 1), 4000);
+    console.log(`Scheduling reconnect attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms...`);
+
+    if (this.reconnectTimeoutId) {
+      clearTimeout(this.reconnectTimeoutId);
+    }
+    this.reconnectTimeoutId = setTimeout(async () => {
+      await this.reconnect();
+    }, delay);
+  }
+
+  private async reconnect() {
+    if (this.isExplicitlyStopped) return;
+    try {
+      this.onStateChange("processing");
+      console.log(
+        "Attempting Live API reconnect with handle:",
+        this.resumptionHandle ? "Preserving context token" : "Starting fresh connection"
+      );
+      await this.connectLive();
+    } catch (err) {
+      console.warn("Reconnection with resumption handle encountered error:", err);
+      // If resuming with existing handle failed, clear handle and attempt fresh session
+      if (this.resumptionHandle) {
+        console.log("Retrying fresh connection without stale resumption handle...");
+        this.resumptionHandle = null;
+        try {
+          await this.connectLive();
+          return;
+        } catch (retryErr) {
+          console.error("Fresh connection retry also encountered error:", retryErr);
+        }
+      }
+      this.triggerAutoReconnect();
     }
   }
 
@@ -258,6 +427,15 @@ export class LiveSessionManager {
   }
 
   stop() {
+    this.isExplicitlyStopped = true;
+    this.isClosingForGoAway = false;
+    this.isReconnecting = false;
+    if (this.reconnectTimeoutId) {
+      clearTimeout(this.reconnectTimeoutId);
+      this.reconnectTimeoutId = null;
+    }
+    this.resumptionHandle = null;
+
     if (this.processor) {
       this.processor.disconnect();
       this.processor = null;
@@ -271,17 +449,29 @@ export class LiveSessionManager {
       this.mediaStream = null;
     }
     if (this.audioContext) {
-      this.audioContext.close();
+      this.audioContext.close().catch(() => {});
       this.audioContext = null;
     }
     this.stopPlayback();
     
+    if (this.currentSession) {
+      try {
+        this.currentSession.close();
+      } catch {}
+      this.currentSession = null;
+    }
     if (this.sessionPromise) {
-      this.sessionPromise.then(session => session.close()).catch(() => {});
+      this.sessionPromise.then(session => {
+        try {
+          session.close();
+        } catch {}
+      }).catch(() => {});
       this.sessionPromise = null;
     }
     
+    this.onReconnecting(false);
     this.onStateChange("idle");
+    this.onClose();
   }
 
   sendText(text: string) {

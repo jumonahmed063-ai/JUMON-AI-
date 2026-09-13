@@ -65,6 +65,7 @@ export default function App() {
   const [textInput, setTextInput] = useState("");
   const [showPermissionModal, setShowPermissionModal] = useState(false);
   const [isSessionActive, setIsSessionActive] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [videoName, setVideoName] = useState<string | null>(null);
   const [videoSize, setVideoSize] = useState<number | null>(null);
@@ -274,6 +275,7 @@ export default function App() {
   const toggleListening = async () => {
     if (isSessionActive) {
       setIsSessionActive(false);
+      setIsReconnecting(false);
       if (liveSessionRef.current) {
         liveSessionRef.current.stop();
         liveSessionRef.current = null;
@@ -283,6 +285,7 @@ export default function App() {
     } else {
       try {
         setIsSessionActive(true);
+        setIsReconnecting(false);
         resetZoyaSession();
         
         const session = new LiveSessionManager();
@@ -303,11 +306,28 @@ export default function App() {
           }, 1000);
         };
 
+        session.onError = (errorMessage) => {
+          console.warn("Live session error notification:", errorMessage);
+          setSavedVideoNotification(errorMessage);
+          setTimeout(() => setSavedVideoNotification(null), 4000);
+        };
+
+        session.onClose = () => {
+          setIsSessionActive(false);
+          setIsReconnecting(false);
+          setAppState("idle");
+        };
+
+        session.onReconnecting = (reconnecting) => {
+          setIsReconnecting(reconnecting);
+        };
+
         await session.start();
       } catch (e) {
         console.error("Failed to start session", e);
         setShowPermissionModal(true);
         setIsSessionActive(false);
+        setIsReconnecting(false);
         setAppState("idle");
       }
     }
@@ -410,8 +430,12 @@ export default function App() {
           <div>
             <h1 className="text-lg md:text-xl font-bold tracking-wider text-white">JUMON AI</h1>
             <p className="text-[11px] text-cyan-300/80 font-mono tracking-wide flex items-center gap-1">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping inline-block" />
-              Creator: Jumon
+              <span className={`w-1.5 h-1.5 rounded-full ${isReconnecting ? "bg-amber-400 animate-spin" : "bg-emerald-400 animate-ping"} inline-block`} />
+              {isReconnecting ? (
+                <span className="text-amber-300 font-semibold">Refreshing Session...</span>
+              ) : (
+                <span>Creator: Jumon</span>
+              )}
             </p>
           </div>
         </div>
@@ -499,7 +523,18 @@ export default function App() {
         <div className="flex w-[25%] h-full flex-col justify-center gap-4 z-10">
           <div className="h-8">
             <AnimatePresence>
-              {appState === "processing" && (
+              {isReconnecting && (
+                <motion.div
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -20 }}
+                  className="flex items-center gap-2 text-amber-300 text-sm md:text-base font-medium font-mono"
+                >
+                  <Loader2 size={18} className="animate-spin text-amber-400" />
+                  <span>Reconnecting...</span>
+                </motion.div>
+              )}
+              {!isReconnecting && appState === "processing" && (
                 <motion.div
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: 1, x: 0 }}
