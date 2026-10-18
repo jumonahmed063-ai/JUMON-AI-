@@ -3,6 +3,16 @@ apply plugin: 'com.android.application'
 android {
     namespace = "com.mdjumon.app"
     compileSdk = rootProject.ext.compileSdkVersion
+
+    signingConfigs {
+        release {
+            storeFile file("release.keystore")
+            storePassword "jumon1234"
+            keyAlias "jumonkey"
+            keyPassword "jumon1234"
+        }
+    }
+
     defaultConfig {
         applicationId "com.mdjumon.app"
         minSdkVersion rootProject.ext.minSdkVersion
@@ -19,6 +29,7 @@ android {
     buildTypes {
         release {
             minifyEnabled false
+            signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }

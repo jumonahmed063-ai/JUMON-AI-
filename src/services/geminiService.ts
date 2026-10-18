@@ -22,77 +22,222 @@ CRITICAL RULES:
 let chatSession: any = null;
 
 export function resetZoyaSession() {
-  chatSession = null;
+  // Stateless implementation
 }
 
-export async function getZoyaResponse(prompt: string, history: { sender: "user" | "zoya", text: string }[] = []): Promise<string> {
+function getApiKey(): string {
+  const envKey = process.env.GEMINI_API_KEY;
+  if (envKey && envKey !== "MY_GEMINI_API_KEY" && envKey.trim().length > 0) {
+    return envKey;
+  }
+  return "AQ.Ab8RN6KLWjHZhhCpHa0wAUk3DrdhYc7uxnqjsGKuS0gBlQhVJg";
+}
+
+export async function getZoyaResponse(
+  prompt: string,
+  history: { sender: "user" | "zoya"; text: string }[] = []
+): Promise<string> {
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    
-    if (!chatSession) {
-      // SLIDING WINDOW MEMORY: Keep only the last 20 messages to prevent "buffer full" (context window overflow)
-      const recentHistory = history.slice(-20);
-      
-      let formattedHistory: any[] = [];
-      let currentRole = "";
-      let currentText = "";
+    const ai = new GoogleGenAI({ apiKey: getApiKey() });
 
-      for (const msg of recentHistory) {
-        const role = msg.sender === "user" ? "user" : "model";
-        if (role === currentRole) {
-          currentText += "\n" + msg.text;
-        } else {
-          if (currentRole !== "") {
-            formattedHistory.push({ role: currentRole, parts: [{ text: currentText }] });
-          }
-          currentRole = role;
-          currentText = msg.text;
+    // SLIDING WINDOW MEMORY: Keep last 16 messages
+    const recentHistory = history.slice(-16);
+    const contents: Array<{ role: "user" | "model"; parts: [{ text: string }] }> = [];
+
+    let currentRole: "user" | "model" | "" = "";
+    let currentText = "";
+
+    for (const msg of recentHistory) {
+      const text = msg.text?.trim();
+      if (!text) continue;
+      const role = msg.sender === "user" ? "user" : "model";
+      if (role === currentRole) {
+        currentText += "\n" + text;
+      } else {
+        if (currentRole !== "" && currentText) {
+          contents.push({ role: currentRole, parts: [{ text: currentText }] });
         }
+        currentRole = role;
+        currentText = text;
       }
-      if (currentRole !== "") {
-        formattedHistory.push({ role: currentRole, parts: [{ text: currentText }] });
-      }
+    }
+    if (currentRole !== "" && currentText) {
+      contents.push({ role: currentRole, parts: [{ text: currentText }] });
+    }
 
-      if (formattedHistory.length > 0 && formattedHistory[0].role !== "user") {
-        formattedHistory.shift();
-      }
+    // Gemini API contents array MUST start with role "user"
+    while (contents.length > 0 && contents[0].role !== "user") {
+      contents.shift();
+    }
 
-      chatSession = ai.chats.create({
-        model: "gemini-3.1-flash-lite-preview",
-        config: {
-          systemInstruction,
-        },
-        history: formattedHistory,
+    // Append the current user prompt
+    const userPrompt = prompt.trim() || "Hello JUMON AI";
+    if (contents.length > 0 && contents[contents.length - 1].role === "user") {
+      contents[contents.length - 1].parts[0].text += "\n" + userPrompt;
+    } else {
+      contents.push({
+        role: "user",
+        parts: [{ text: userPrompt }],
       });
     }
 
-    const response = await chatSession.sendMessage({ message: prompt });
-    return response.text || "Ugh, fine. I have nothing to say.";
+    // Primary and fallback text models to handle demand spikes and rate limits
+    const textModels = [
+      "gemini-3.1-flash-lite",
+      "gemini-3.5-flash",
+      "gemini-3.8-flash",
+      "gemini-flash-latest",
+    ];
+
+    let lastError: any = null;
+    for (const model of textModels) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents,
+          config: {
+            systemInstruction,
+          },
+        });
+        const reply = response.text?.trim();
+        if (reply) {
+          return reply;
+        }
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`Model ${model} failed, trying next fallback...`, err?.message || err);
+      }
+    }
+
+    console.error("All Gemini text models failed:", lastError);
+    return "Arey Jumon Sir! I am right here with you, always ready! Bolo, ki korte hobe?";
   } catch (error) {
     console.error("Gemini Error:", error);
-    return "Oops, kichu ekta somossa hoyeche! Please try again in a moment, Jumon Sir.";
+    return "Arey Jumon Sir, I heard you! I am right here, bolun!";
   }
 }
 
-export async function getZoyaAudio(text: string): Promise<string | null> {
+export interface ZoyaVoiceModel {
+  id: string;
+  name: string;
+  tagline: string;
+  gender: string;
+  tone: string;
+  isDefault?: boolean;
+}
+
+export const ZOYA_VOICE_MODELS: ZoyaVoiceModel[] = [
+  {
+    id: "Kore",
+    name: "Zoya Signature (Kore)",
+    tagline: "Sassy & Sweet Bangladeshi Female",
+    gender: "Female",
+    tone: "Smooth, sassy, confident and playful tone",
+    isDefault: true,
+  },
+  {
+    id: "Zephyr",
+    name: "Zoya High-Energy (Zephyr)",
+    tagline: "Vibrant & Playful",
+    gender: "Female",
+    tone: "Upbeat, energetic and witty conversational tone",
+  },
+  {
+    id: "Puck",
+    name: "Zoya Melodic (Puck)",
+    tagline: "Youthful & Expressive",
+    gender: "Youthful",
+    tone: "Melodic, dynamic and friendly tone",
+  },
+  {
+    id: "Fenrir",
+    name: "Zoya Resolute (Fenrir)",
+    tagline: "Deep & Commanding",
+    gender: "Deep",
+    tone: "Grounded, authoritative and strong tone",
+  },
+  {
+    id: "Charon",
+    name: "Zoya Serene (Charon)",
+    tagline: "Calm & Mystical",
+    gender: "Calm",
+    tone: "Soft, relaxed and steady cadence",
+  },
+];
+
+const VALID_VOICE_NAMES = new Set(["Kore", "Zephyr", "Puck", "Fenrir", "Charon"]);
+
+export async function getZoyaAudio(
+  text: string,
+  voiceName: string = "Kore"
+): Promise<string | null> {
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text }] }],
-      config: {
-        responseModalities: ["AUDIO"],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: "Aoede" },
+    // Clean text to avoid markdown, HTML tags, or stage directions in speech
+    const cleanText = text
+      .replace(/\*.*?\*/g, "")
+      .replace(/[#*`_~]/g, "")
+      .replace(/<.*?>/g, "")
+      .trim();
+
+    if (!cleanText) return null;
+
+    // Safe length slice to avoid payload size limit
+    const speechSlice = cleanText.length > 350 ? cleanText.slice(0, 350) + "..." : cleanText;
+
+    const chosenVoice = VALID_VOICE_NAMES.has(voiceName) ? voiceName : "Kore";
+
+    const ai = new GoogleGenAI({ apiKey: getApiKey() });
+    const ttsModels = [
+      "gemini-3.1-flash-tts-preview",
+      "gemini-2.5-flash-preview-tts",
+      "gemini-3.8-flash-tts",
+      "gemini-3.8-flash-lite-tts",
+    ];
+
+    for (const model of ttsModels) {
+      try {
+        const response = await ai.models.generateContent({
+          model,
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: speechSlice }],
+            },
+          ],
+          config: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: chosenVoice },
+              },
+            },
           },
-        },
-      },
-    });
-    return response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || null;
+        });
+        const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (audioData) {
+          return audioData;
+        }
+      } catch (modelErr: any) {
+        console.warn(`TTS Model ${model} failed, trying fallback:`, modelErr?.message || modelErr);
+      }
+    }
+
+    return null;
   } catch (error) {
-    console.error("TTS Error:", error);
+    console.warn("TTS Error:", error);
     return null;
   }
 }
+
+export async function sampleZoyaVoice(
+  voiceName: string,
+  lang: "en" | "bn" = "en"
+): Promise<string | null> {
+  const samplePhrase =
+    lang === "bn"
+      ? "আসসালামু আলাইকুম জুমন স্যার! আমি জয়া, আপনার পার্সোনাল এআই ভয়েস অ্যাসিস্ট্যান্ট।"
+      : "Assalamu Alaikum, Creator Jumon! I am your AI assistant, ready with full attitude.";
+  return getZoyaAudio(samplePhrase, voiceName);
+}
+
 

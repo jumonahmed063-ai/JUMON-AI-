@@ -6,8 +6,10 @@
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
+    "cap:sync": "vite build && cap sync android",
     "cap:build": "vite build && cap sync android",
     "cap:apk": "vite build && cap sync android && cd android && ./gradlew assembleDebug",
+    "cap:release": "vite build && cap sync android && cd android && ./gradlew assembleRelease",
     "cap:open": "cap open android",
     "preview": "vite preview",
     "clean": "rm -rf dist",
@@ -16,6 +18,8 @@
   "dependencies": {
     "@capacitor/android": "^8.5.2",
     "@capacitor/core": "^8.5.2",
+    "@capacitor/network": "^8.0.1",
+    "@capacitor/splash-screen": "^8.0.2",
     "@google/genai": "^1.47.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",

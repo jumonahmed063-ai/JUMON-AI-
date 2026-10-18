@@ -1,6 +1,6 @@
 import React, { useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { X, Film, UploadCloud, Trash2, CheckCircle2, Sliders, Eye, Loader2, Sparkles } from "lucide-react";
+import { X, Film, UploadCloud, Trash2, CheckCircle2, Sliders, Eye, Loader2, Sparkles, Flame, MessageSquareQuote } from "lucide-react";
 
 interface VideoModalProps {
   isOpen: boolean;
@@ -15,6 +15,8 @@ interface VideoModalProps {
   onUpload: (file: File) => Promise<void>;
   onDelete: () => Promise<void>;
   isSaving: boolean;
+  isSassyMode: boolean;
+  onToggleSassyMode: () => void;
 }
 
 function formatBytes(bytes?: number | null): string {
@@ -38,6 +40,8 @@ export default function VideoModal({
   onUpload,
   onDelete,
   isSaving,
+  isSassyMode,
+  onToggleSassyMode,
 }: VideoModalProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -81,11 +85,11 @@ export default function VideoModal({
           <div className="flex items-center justify-between pb-4 border-b border-white/10">
             <div className="flex items-center gap-2.5">
               <div className="p-2 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-400">
-                <Film size={20} />
+                <Sliders size={20} />
               </div>
               <div>
-                <h3 className="text-lg font-bold text-white tracking-wide">Avatar Video Settings</h3>
-                <p className="text-xs text-white/50">Permanently saved to browser IndexedDB</p>
+                <h3 className="text-lg font-bold text-white tracking-wide">Assistant Settings</h3>
+                <p className="text-xs text-white/50">Persona personality & avatar video customization</p>
               </div>
             </div>
             <button
@@ -98,6 +102,57 @@ export default function VideoModal({
 
           {/* Body */}
           <div className="py-5 space-y-5">
+            {/* Sassy Mode Toggle Card */}
+            <div className="bg-gradient-to-br from-pink-950/40 via-purple-950/30 to-amber-950/20 border border-pink-500/40 rounded-xl p-4 space-y-3 shadow-lg shadow-pink-950/20">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-pink-500/20 border border-pink-500/40 text-pink-400 flex items-center justify-center shrink-0">
+                    <Flame size={18} className={isSassyMode ? "text-pink-300 animate-pulse" : "text-pink-400/70"} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h4 className="text-sm font-bold text-white tracking-wide">Sassy Mode</h4>
+                      {isSassyMode && (
+                        <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 border border-pink-500/30 uppercase">
+                          Active
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-white/60">
+                      Prepends witty & sassy remarks from JUMON AI before every response
+                    </p>
+                  </div>
+                </div>
+
+                {/* Sassy Mode Switch */}
+                <button
+                  id="sassy-mode-toggle-btn"
+                  type="button"
+                  onClick={onToggleSassyMode}
+                  className={`w-12 h-6.5 rounded-full transition-all relative p-0.5 shrink-0 focus:outline-none focus:ring-2 focus:ring-pink-400/50 ${
+                    isSassyMode ? "bg-gradient-to-r from-pink-500 to-amber-500 shadow-md shadow-pink-500/30" : "bg-white/20"
+                  }`}
+                  role="switch"
+                  aria-checked={isSassyMode}
+                >
+                  <div
+                    className={`w-5 h-5 rounded-full bg-white transition-transform shadow-md ${
+                      isSassyMode ? "translate-x-5.5" : "translate-x-0"
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* Sassy Mode preview banner */}
+              <div className="pt-2 border-t border-pink-500/20 flex items-start gap-2 text-[11px] text-pink-200/80 leading-relaxed font-mono">
+                <MessageSquareQuote size={14} className="text-pink-400 shrink-0 mt-0.5" />
+                <span>
+                  {isSassyMode 
+                    ? "Example: \"Bow down, mortals! JUMON AI is serving pure intellect with extra attitude...\"" 
+                    : "Turn on to give JUMON AI maximum attitude and witty commentary on every prompt."}
+                </span>
+              </div>
+            </div>
             {/* Status Card */}
             {videoSrc ? (
               <div className="bg-cyan-950/40 border border-cyan-500/30 rounded-xl p-4 space-y-3">

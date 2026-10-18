@@ -1,14 +1,16 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Mic, MicOff, Loader2, Volume2, VolumeX, Keyboard, Send, Trash2, Video, MessageSquare, X, Sparkles, Film, UploadCloud, CheckCircle2, Sliders, AlertCircle, Crown, Zap } from "lucide-react";
+import { Mic, MicOff, Loader2, Volume2, VolumeX, Keyboard, Send, Trash2, Video, MessageSquare, X, Sparkles, Film, UploadCloud, CheckCircle2, Sliders, AlertCircle, Crown, Zap, Languages } from "lucide-react";
 import { getZoyaResponse, getZoyaAudio, resetZoyaSession } from "./services/geminiService";
 import { processCommand } from "./services/commandService";
-import { LiveSessionManager } from "./services/liveService";
 import Visualizer from "./components/Visualizer";
 import PermissionModal from "./components/PermissionModal";
-import VideoModal from "./components/VideoModal";
-import { playPCM } from "./utils/audioUtils";
+import SettingsModal from "./components/SettingsModal";
+import { playPCM, speakWithBrowserFallback } from "./utils/audioUtils";
 import { saveVideoPermanently, getPermanentlySavedVideo, deletePermanentlySavedVideo } from "./utils/videoStorage";
 import { BOSS_MODE_GREETINGS } from "./data/bossMode";
+import { applySassyRemark, QuickSassyReply } from "./utils/sassyMode";
+import QuickSassyReplies from "./components/QuickSassyReplies";
+import { initNativeFeatures, requestMicrophonePermission, checkNetworkStatus, onNetworkStatusChange } from "./utils/nativeUtils";
 import { motion, AnimatePresence } from "motion/react";
 
 type AppState = "idle" | "listening" | "processing" | "speaking";
@@ -54,24 +56,31 @@ export default function App() {
 
   const [isMuted, setIsMuted] = useState(false);
 
-  useEffect(() => {
-    if (liveSessionRef.current) {
-      liveSessionRef.current.isMuted = isMuted;
-    }
-  }, [isMuted]);
-
   const [showTextInput, setShowTextInput] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [textInput, setTextInput] = useState("");
   const [showPermissionModal, setShowPermissionModal] = useState(false);
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [audioVolume, setAudioVolume] = useState(0);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [videoName, setVideoName] = useState<string | null>(null);
   const [videoSize, setVideoSize] = useState<number | null>(null);
   const [isSavingVideo, setIsSavingVideo] = useState(false);
   const [savedVideoNotification, setSavedVideoNotification] = useState<string | null>(null);
-  const [showVideoModal, setShowVideoModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
+    const saved = localStorage.getItem("jumon_dark_mode");
+    return saved !== null ? saved === "true" : true;
+  });
+  const [pushNotifications, setPushNotifications] = useState<boolean>(() => {
+    const saved = localStorage.getItem("jumon_push_notifications");
+    return saved !== null ? saved === "true" : true;
+  });
+  const [currentLanguage, setCurrentLanguage] = useState<"en" | "bn">(() => {
+    const saved = localStorage.getItem("jumon_language");
+    return saved === "en" ? "en" : "bn";
+  });
   const [isDragging, setIsDragging] = useState(false);
   const [videoOpacity, setVideoOpacity] = useState<number>(() => {
     const saved = localStorage.getItem("jumon_video_opacity");
@@ -81,6 +90,141 @@ export default function App() {
     const saved = localStorage.getItem("jumon_hud_over_video");
     return saved ? saved === "true" : true;
   });
+  const [isSassyMode, setIsSassyMode] = useState<boolean>(() => {
+    const saved = localStorage.getItem("jumon_sassy_mode");
+    return saved ? saved === "true" : false;
+  });
+  const [selectedVoiceModel, setSelectedVoiceModel] = useState<string>(() => {
+    return localStorage.getItem("jumon_zoya_voice") || "Kore";
+  });
+  const selectedVoiceModelRef = useRef(selectedVoiceModel);
+  const [isOnline, setIsOnline] = useState<boolean>(true);
+  const isOnlineRef = useRef<boolean>(true);
+  const isSassyModeRef = useRef(isSassyMode);
+  const appStateRef = useRef<AppState>(appState);
+  const isSessionActiveRef = useRef<boolean>(isSessionActive);
+  const currentLanguageRef = useRef<"en" | "bn">(currentLanguage);
+  const startSpeechListeningRef = useRef<() => void>(() => {});
+
+  useEffect(() => {
+    appStateRef.current = appState;
+  }, [appState]);
+
+  useEffect(() => {
+    isSessionActiveRef.current = isSessionActive;
+  }, [isSessionActive]);
+
+  useEffect(() => {
+    currentLanguageRef.current = currentLanguage;
+  }, [currentLanguage]);
+
+  const handleSelectVoiceModel = useCallback((voiceId: string) => {
+    setSelectedVoiceModel(voiceId);
+    selectedVoiceModelRef.current = voiceId;
+    localStorage.setItem("jumon_zoya_voice", voiceId);
+    setSavedVideoNotification(`🎙️ Zoya Voice updated to ${voiceId}`);
+    setTimeout(() => setSavedVideoNotification(null), 3000);
+  }, []);
+
+  const toggleDarkMode = useCallback(() => {
+    setIsDarkMode((prev) => {
+      const next = !prev;
+      localStorage.setItem("jumon_dark_mode", String(next));
+      setSavedVideoNotification(next ? "🌙 Dark Mode activated" : "☀️ High Contrast Mode activated");
+      setTimeout(() => setSavedVideoNotification(null), 3000);
+      return next;
+    });
+  }, []);
+
+  const toggleNotifications = useCallback(async () => {
+    if (!pushNotifications) {
+      if ("Notification" in window) {
+        try {
+          const perm = await Notification.requestPermission();
+          if (perm === "granted") {
+            setPushNotifications(true);
+            localStorage.setItem("jumon_push_notifications", "true");
+            new Notification("JUMON AI", {
+              body: "Push Notifications enabled for MR JUMON!",
+              icon: "/favicon.ico",
+            });
+            setSavedVideoNotification("🔔 Push Notifications enabled!");
+          } else {
+            setSavedVideoNotification("⚠️ Notification permission not granted in browser");
+          }
+        } catch {
+          setPushNotifications(true);
+          localStorage.setItem("jumon_push_notifications", "true");
+          setSavedVideoNotification("🔔 Push Notifications enabled!");
+        }
+      } else {
+        setPushNotifications(true);
+        localStorage.setItem("jumon_push_notifications", "true");
+        setSavedVideoNotification("🔔 Push Notifications enabled!");
+      }
+    } else {
+      setPushNotifications(false);
+      localStorage.setItem("jumon_push_notifications", "false");
+      setSavedVideoNotification("🔕 Push Notifications disabled");
+    }
+    setTimeout(() => setSavedVideoNotification(null), 3000);
+  }, [pushNotifications]);
+
+  const toggleLanguage = useCallback(() => {
+    setCurrentLanguage((prev) => {
+      const next = prev === "bn" ? "en" : "bn";
+      localStorage.setItem("jumon_language", next);
+      setSavedVideoNotification(
+        next === "bn" ? "🇧🇩 Language set to বাংলা (Bangla)" : "🌐 Language set to English"
+      );
+      setTimeout(() => setSavedVideoNotification(null), 3000);
+      return next;
+    });
+  }, []);
+
+  // Initialize native Capacitor capabilities (hide native splash screen, track network)
+  useEffect(() => {
+    initNativeFeatures();
+
+    checkNetworkStatus().then((status) => {
+      setIsOnline(status.connected);
+    });
+
+    const unsubscribe = onNetworkStatusChange((connected) => {
+      setIsOnline(connected);
+      if (!connected) {
+        setSavedVideoNotification("⚠️ No internet connection detected. Gemini AI requires active network.");
+      } else {
+        setSavedVideoNotification("✅ Internet connection restored!");
+        setTimeout(() => setSavedVideoNotification(null), 3000);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    isSassyModeRef.current = isSassyMode;
+  }, [isSassyMode]);
+
+  const toggleSassyMode = useCallback(() => {
+    setIsSassyMode((prev) => {
+      const next = !prev;
+      isSassyModeRef.current = next;
+      localStorage.setItem("jumon_sassy_mode", String(next));
+      setSavedVideoNotification(next ? "🔥 Sassy Mode activated! JUMON AI is extra witty now." : "Sassy Mode deactivated.");
+      setTimeout(() => setSavedVideoNotification(null), 3500);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (appState !== "speaking") {
+      setAudioVolume(0);
+    }
+  }, [appState]);
 
   // Permanently load saved video from IndexedDB on initial mount
   useEffect(() => {
@@ -132,7 +276,7 @@ export default function App() {
       setVideoSrc(null);
       setVideoName(null);
       setVideoSize(null);
-      setShowVideoModal(false);
+      setShowSettingsModal(false);
       setSavedVideoNotification("Video avatar removed. JUMON Cyber Visualizer active.");
       setTimeout(() => setSavedVideoNotification(null), 3500);
     } catch (err) {
@@ -153,7 +297,14 @@ export default function App() {
     });
   };
 
-  const liveSessionRef = useRef<LiveSessionManager | null>(null);
+  const getAvatarPulseClass = useCallback(() => {
+    if (appState === "processing") return "avatar-pulse-thinking";
+    if (appState === "speaking") return "avatar-pulse-speaking";
+    if (appState === "listening") return "avatar-pulse-listening";
+    if (isSessionActive) return "avatar-pulse-active";
+    return "avatar-pulse-subtle";
+  }, [appState, isSessionActive]);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -166,18 +317,15 @@ export default function App() {
 
   const handleTextCommand = useCallback(async (finalTranscript: string) => {
     if (!finalTranscript.trim()) {
-      setAppState("idle");
+      if (isSessionActiveRef.current) {
+        startSpeechListeningRef.current();
+      } else {
+        setAppState("idle");
+      }
       return;
     }
 
     setMessages((prev) => [...prev, { id: Date.now().toString(), sender: "user", text: finalTranscript }]);
-    
-    // If live session is active, send text through it
-    if (isSessionActive && liveSessionRef.current) {
-      liveSessionRef.current.sendText(finalTranscript);
-      return;
-    }
-
     setAppState("processing");
 
     // 1. Check for browser commands
@@ -186,18 +334,25 @@ export default function App() {
     let responseText = "";
 
     if (commandResult.isBrowserAction) {
-      responseText = commandResult.action;
+      responseText = applySassyRemark(commandResult.action, isSassyModeRef.current);
       setMessages((prev) => [...prev, { id: Date.now().toString() + "-z", sender: "zoya", text: responseText }]);
       
       if (!isMuted) {
         setAppState("speaking");
-        const audioBase64 = await getZoyaAudio(responseText);
+        const audioBase64 = await getZoyaAudio(responseText, selectedVoiceModelRef.current);
         if (audioBase64) {
-          await playPCM(audioBase64);
+          await playPCM(audioBase64, setAudioVolume);
+        } else {
+          await speakWithBrowserFallback(responseText, setAudioVolume);
         }
       }
 
-      setAppState("idle");
+      setAudioVolume(0);
+      if (isSessionActiveRef.current) {
+        startSpeechListeningRef.current();
+      } else {
+        setAppState("idle");
+      }
 
       setTimeout(() => {
         if (commandResult.url) {
@@ -206,19 +361,27 @@ export default function App() {
       }, 1500);
     } else {
       // 2. General Chit-Chat via Gemini
-      responseText = await getZoyaResponse(finalTranscript, messagesRef.current);
+      const rawAiResponse = await getZoyaResponse(finalTranscript, messagesRef.current);
+      responseText = applySassyRemark(rawAiResponse, isSassyModeRef.current);
       setMessages((prev) => [...prev, { id: Date.now().toString() + "-z", sender: "zoya", text: responseText }]);
       
       if (!isMuted) {
         setAppState("speaking");
-        const audioBase64 = await getZoyaAudio(responseText);
+        const audioBase64 = await getZoyaAudio(responseText, selectedVoiceModelRef.current);
         if (audioBase64) {
-          await playPCM(audioBase64);
+          await playPCM(audioBase64, setAudioVolume);
+        } else {
+          await speakWithBrowserFallback(responseText, setAudioVolume);
         }
       }
-      setAppState("idle");
+      setAudioVolume(0);
+      if (isSessionActiveRef.current) {
+        startSpeechListeningRef.current();
+      } else {
+        setAppState("idle");
+      }
     }
-  }, [isMuted, isSessionActive]);
+  }, [isMuted]);
 
   const bossModeIndexRef = useRef(0);
 
@@ -231,13 +394,6 @@ export default function App() {
       { id: Date.now().toString(), sender: "user", text: userPrompt },
     ]);
 
-    if (isSessionActive && liveSessionRef.current) {
-      liveSessionRef.current.sendText(
-        "Boss Mode activated! Greet me as your Creator Jumon and list today's priorities in your funniest, sassiest tone!"
-      );
-      return;
-    }
-
     const script = BOSS_MODE_GREETINGS[bossModeIndexRef.current % BOSS_MODE_GREETINGS.length];
     bossModeIndexRef.current += 1;
 
@@ -249,87 +405,219 @@ export default function App() {
     if (!isMuted) {
       try {
         setAppState("processing");
-        const audioBase64 = await getZoyaAudio(script.message);
+        const audioBase64 = await getZoyaAudio(script.message, selectedVoiceModelRef.current);
+        setAppState("speaking");
         if (audioBase64) {
-          setAppState("speaking");
-          await playPCM(audioBase64);
+          await playPCM(audioBase64, setAudioVolume);
+        } else {
+          await speakWithBrowserFallback(script.message, setAudioVolume);
         }
       } catch (err) {
         console.error("Boss Mode audio playback error:", err);
       } finally {
+        setAudioVolume(0);
         setAppState("idle");
       }
     } else {
+      setAudioVolume(0);
       setAppState("idle");
     }
-  }, [appState, isMuted, isSessionActive]);
+  }, [appState, isMuted]);
+
+  const recognitionRef = useRef<any>(null);
+  const listenAnimRef = useRef<number | null>(null);
+
+  const stopListening = useCallback(() => {
+    isSessionActiveRef.current = false;
+    setIsSessionActive(false);
+    if (listenAnimRef.current) {
+      clearInterval(listenAnimRef.current);
+      listenAnimRef.current = null;
+    }
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.abort();
+      } catch (e) {}
+      recognitionRef.current = null;
+    }
+    setIsReconnecting(false);
+    setAudioVolume(0);
+    setAppState("idle");
+  }, []);
 
   useEffect(() => {
     return () => {
-      if (liveSessionRef.current) {
-        liveSessionRef.current.stop();
-      }
+      stopListening();
     };
-  }, []);
+  }, [stopListening]);
+
+  const startSpeechListening = useCallback(() => {
+    const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRec) {
+      setSavedVideoNotification("⚠️ Speech Recognition not supported in this browser. Please use text input.");
+      setTimeout(() => setSavedVideoNotification(null), 4000);
+      setShowTextInput(true);
+      setAppState("idle");
+      return;
+    }
+
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.abort();
+      } catch (e) {}
+      recognitionRef.current = null;
+    }
+
+    try {
+      const recognition = new SpeechRec();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = currentLanguageRef.current === "bn" ? "bn-BD" : "en-US";
+
+      recognition.onstart = () => {
+        setAppState("listening");
+        // Provide lively visual feedback that JUMON AI is listening
+        if (listenAnimRef.current) clearInterval(listenAnimRef.current);
+        listenAnimRef.current = window.setInterval(() => {
+          if (appStateRef.current === "listening") {
+            setAudioVolume(0.12 + Math.random() * 0.12);
+          }
+        }, 160);
+      };
+
+      recognition.onresult = (event: any) => {
+        let finalTranscript = "";
+        let interimTranscript = "";
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const item = event.results[i];
+          if (item.isFinal) {
+            finalTranscript += item[0]?.transcript || "";
+          } else {
+            interimTranscript += item[0]?.transcript || "";
+          }
+        }
+
+        if (interimTranscript) {
+          // Surge audio volume when hearing voice
+          setAudioVolume(0.45 + Math.random() * 0.35);
+        }
+
+        if (finalTranscript && finalTranscript.trim()) {
+          if (listenAnimRef.current) {
+            clearInterval(listenAnimRef.current);
+            listenAnimRef.current = null;
+          }
+          try {
+            recognition.stop();
+          } catch (e) {}
+          setAudioVolume(0);
+          handleTextCommand(finalTranscript.trim());
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.warn("Speech recognition event:", event.error);
+        if (event.error === "no-speech" || event.error === "aborted") {
+          return;
+        }
+        if (event.error === "network" || event.error === "audio-capture") {
+          if (isSessionActiveRef.current) {
+            setTimeout(() => {
+              if (isSessionActiveRef.current && appStateRef.current === "listening") {
+                startSpeechListeningRef.current();
+              }
+            }, 600);
+          }
+        }
+      };
+
+      recognition.onend = () => {
+        if (isSessionActiveRef.current && appStateRef.current === "listening") {
+          try {
+            recognition.start();
+          } catch (e) {
+            setTimeout(() => {
+              if (isSessionActiveRef.current && appStateRef.current === "listening") {
+                startSpeechListeningRef.current();
+              }
+            }, 300);
+          }
+        }
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+      setAppState("listening");
+    } catch (e) {
+      console.error("Failed to start speech recognition:", e);
+      if (isSessionActiveRef.current) {
+        setTimeout(() => {
+          if (isSessionActiveRef.current) {
+            startSpeechListeningRef.current();
+          }
+        }, 800);
+      }
+    }
+  }, [handleTextCommand]);
+
+  useEffect(() => {
+    startSpeechListeningRef.current = startSpeechListening;
+  }, [startSpeechListening]);
 
   const toggleListening = async () => {
     if (isSessionActive) {
-      setIsSessionActive(false);
-      setIsReconnecting(false);
-      if (liveSessionRef.current) {
-        liveSessionRef.current.stop();
-        liveSessionRef.current = null;
-      }
-      setAppState("idle");
+      stopListening();
       resetZoyaSession();
-    } else {
-      try {
-        setIsSessionActive(true);
-        setIsReconnecting(false);
-        resetZoyaSession();
-        
-        const session = new LiveSessionManager();
-        session.isMuted = isMuted;
-        liveSessionRef.current = session;
-        
-        session.onStateChange = (state) => {
-          setAppState(state);
-        };
-        
-        session.onMessage = (sender, text) => {
-          setMessages((prev) => [...prev, { id: Date.now().toString() + "-" + sender, sender, text }]);
-        };
-        
-        session.onCommand = (url) => {
-          setTimeout(() => {
-            window.open(url, "_blank");
-          }, 1000);
-        };
+      return;
+    }
 
-        session.onError = (errorMessage) => {
-          console.warn("Live session error notification:", errorMessage);
-          setSavedVideoNotification(errorMessage);
-          setTimeout(() => setSavedVideoNotification(null), 4000);
-        };
+    // Check network status before starting voice session
+    if (!isOnline) {
+      setSavedVideoNotification("❌ Cannot start voice session: No internet connection.");
+      setTimeout(() => setSavedVideoNotification(null), 4000);
+      return;
+    }
 
-        session.onClose = () => {
-          setIsSessionActive(false);
-          setIsReconnecting(false);
-          setAppState("idle");
-        };
-
-        session.onReconnecting = (reconnecting) => {
-          setIsReconnecting(reconnecting);
-        };
-
-        await session.start();
-      } catch (e) {
-        console.error("Failed to start session", e);
+    try {
+      const micGranted = await requestMicrophonePermission();
+      if (!micGranted) {
         setShowPermissionModal(true);
-        setIsSessionActive(false);
-        setIsReconnecting(false);
-        setAppState("idle");
+        return;
       }
+
+      setIsSessionActive(true);
+      isSessionActiveRef.current = true;
+
+      // Speak greeting to Creator Jumon immediately so the assistant speaks first!
+      const greetingText =
+        currentLanguage === "bn"
+          ? "আসসালামু আলাইকুম জুমন স্যার! আমি জুমন এআই, শুনতে প্রস্তুত। বলুন কি করতে হবে!"
+          : "Assalamu Alaikum Creator Jumon! I am JUMON AI, ready to assist you. How can I help you today?";
+
+      setMessages((prev) => [
+        ...prev,
+        { id: Date.now().toString() + "-greet", sender: "zoya", text: greetingText },
+      ]);
+
+      if (!isMuted) {
+        setAppState("speaking");
+        const audioBase64 = await getZoyaAudio(greetingText, selectedVoiceModelRef.current);
+        if (audioBase64) {
+          await playPCM(audioBase64, setAudioVolume);
+        } else {
+          await speakWithBrowserFallback(greetingText, setAudioVolume);
+        }
+      }
+
+      setAudioVolume(0);
+      if (isSessionActiveRef.current) {
+        startSpeechListeningRef.current();
+      }
+    } catch (e) {
+      console.error("Failed to start voice recognition session:", e);
+      stopListening();
+      setShowPermissionModal(true);
     }
   };
 
@@ -341,6 +629,10 @@ export default function App() {
     setTextInput("");
     setShowTextInput(false);
   };
+
+  const handleSelectSassyReply = useCallback((reply: QuickSassyReply) => {
+    handleTextCommand(reply.prompt);
+  }, [handleTextCommand]);
 
   // Get the most recent user and AI message for subtitle display
   const latestAiMessage = [...messages].reverse().find(m => m.sender === "zoya");
@@ -364,7 +656,7 @@ export default function App() {
           handleVideoUpload(file);
         }
       }}
-      className="h-[100dvh] w-screen bg-[#02080b] text-white flex flex-col items-center justify-between font-sans relative overflow-hidden m-0 p-0 select-none"
+      className={`h-[100dvh] w-screen ${isDarkMode ? "bg-[#02080b]" : "bg-[#08121a]"} text-white flex flex-col items-center justify-between font-sans relative overflow-hidden m-0 p-0 select-none transition-colors duration-500`}
     >
       {showPermissionModal && (
         <PermissionModal 
@@ -372,10 +664,18 @@ export default function App() {
         />
       )}
 
-      {/* Permanent Video Avatar Settings Modal */}
-      <VideoModal
-        isOpen={showVideoModal}
-        onClose={() => setShowVideoModal(false)}
+      {/* Settings Modal (Matching Android layout: Settings, Dark Mode, Push Notifications, Language, Zoya Voice, Avatar & Sassy Mode) */}
+      <SettingsModal
+        isOpen={showSettingsModal}
+        onClose={() => setShowSettingsModal(false)}
+        isDarkMode={isDarkMode}
+        onToggleDarkMode={toggleDarkMode}
+        pushNotifications={pushNotifications}
+        onToggleNotifications={toggleNotifications}
+        currentLanguage={currentLanguage}
+        onToggleLanguage={toggleLanguage}
+        selectedVoiceModel={selectedVoiceModel}
+        onSelectVoiceModel={handleSelectVoiceModel}
         videoSrc={videoSrc}
         videoName={videoName}
         videoSize={videoSize}
@@ -383,9 +683,11 @@ export default function App() {
         onOpacityChange={updateVideoOpacity}
         showHudOverVideo={showHudOverVideo}
         onToggleHud={toggleHudOverVideo}
-        onUpload={handleVideoUpload}
-        onDelete={handleRemoveVideo}
-        isSaving={isSavingVideo}
+        onUploadVideo={handleVideoUpload}
+        onDeleteVideo={handleRemoveVideo}
+        isSavingVideo={isSavingVideo}
+        isSassyMode={isSassyMode}
+        onToggleSassyMode={toggleSassyMode}
       />
 
       {/* Toast Notification for permanent video save */}
@@ -469,25 +771,42 @@ export default function App() {
             <MessageSquare size={18} />
           </button>
 
-          {/* Video Avatar Settings & Permanent Storage */}
+          {/* Zoya Voice Model Quick Button */}
           <button
-            onClick={() => setShowVideoModal(true)}
+            id="voice-model-pill-btn"
+            onClick={() => setShowSettingsModal(true)}
+            className="px-2.5 py-1.5 rounded-full bg-pink-500/10 hover:bg-pink-500/20 border border-pink-500/30 text-pink-300 transition-all flex items-center gap-1.5 text-xs font-mono"
+            title={`Active Voice Model: ${selectedVoiceModel} (Click to change)`}
+          >
+            <Volume2 size={15} className="text-pink-400" />
+            <span className="hidden md:inline text-white/60">Voice:</span>
+            <span className="font-bold text-pink-200">{selectedVoiceModel}</span>
+          </button>
+
+          {/* Settings Modal (Dark Mode, Push Notifications, Language, Voice & Sassy Mode) */}
+          <button
+            id="settings-modal-btn"
+            onClick={() => setShowSettingsModal(true)}
             className={`p-2.5 rounded-full transition-all border flex items-center gap-1.5 ${
-              videoSrc 
+              isSassyMode
+                ? "bg-gradient-to-r from-pink-500/25 to-purple-500/25 border-pink-400/60 text-pink-300 shadow-lg shadow-pink-500/20"
+                : videoSrc 
                 ? "bg-gradient-to-r from-pink-500/20 to-cyan-500/20 border-pink-400/50 text-pink-300 shadow-lg shadow-pink-500/20" 
                 : "bg-white/5 hover:bg-white/10 border-white/10 text-white/70 hover:text-white"
             }`}
-            title={videoSrc ? "Avatar Video (Saved Permanently) - Click to manage" : "Set Permanent Video Avatar"}
+            title="Settings (Dark Mode, Notifications, Language, Voice)"
           >
-            {videoSrc ? (
-              <>
-                <Film size={18} className="text-pink-300" />
-                <span className="hidden sm:inline text-xs font-mono font-medium text-pink-200">Video Active</span>
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              </>
-            ) : (
-              <Video size={18} />
+            <Sliders size={18} className={isSassyMode ? "text-pink-300" : "text-white/80"} />
+            {isSassyMode && (
+              <span className="hidden sm:inline text-xs font-mono font-medium text-pink-200">
+                Sassy Active
+              </span>
             )}
+            {isSassyMode ? (
+              <span className="w-1.5 h-1.5 rounded-full bg-pink-400 animate-pulse" />
+            ) : videoSrc ? (
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            ) : null}
           </button>
 
           {messages.length > 0 && (
@@ -561,7 +880,13 @@ export default function App() {
         </div>
 
         {/* Center Visualizer & Video Avatar */}
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-0">
+        <div 
+          id="central-avatar-container"
+          className={`absolute inset-0 flex items-center justify-center pointer-events-none z-0 overflow-visible transition-all duration-300 ${getAvatarPulseClass()}`}
+          style={{
+            "--audio-volume": appState === "speaking" ? audioVolume.toFixed(3) : "0",
+          } as React.CSSProperties}
+        >
           {videoSrc && (
             <video 
               src={videoSrc}
@@ -574,8 +899,16 @@ export default function App() {
             />
           )}
           {(!videoSrc || showHudOverVideo) && (
-            <div className={videoSrc ? "absolute inset-0 flex items-center justify-center scale-95" : ""}>
-              <Visualizer state={appState} />
+            <div 
+              id="visualizer-container-wrapper"
+              className={`absolute inset-0 flex items-center justify-center pointer-events-none transition-all duration-100 ease-out ${videoSrc ? "scale-95" : ""}`}
+              style={{
+                filter: appState === "speaking" && audioVolume > 0.05
+                  ? `drop-shadow(0 0 ${12 + audioVolume * 26}px rgba(236, 72, 153, ${0.35 + audioVolume * 0.45}))`
+                  : undefined
+              }}
+            >
+              <Visualizer state={appState} volume={audioVolume} />
             </div>
           )}
         </div>
@@ -629,7 +962,9 @@ export default function App() {
                 )}
               </div>
               <p className={`text-sm md:text-base font-medium leading-relaxed ${
-                latestAiMessage.id.includes("-boss") ? "text-amber-50" : "text-cyan-50"
+                latestAiMessage.id.includes("-boss") 
+                  ? "text-amber-50" 
+                  : "text-cyan-50"
               }`}>
                 "{latestAiMessage.text}"
               </p>
@@ -702,7 +1037,19 @@ export default function App() {
               <div ref={messagesEndRef} />
             </div>
 
-            <div className="pt-3 border-t border-white/10 flex gap-2">
+            {/* Quick Sassy Replies inside Transcript Drawer when Sassy Mode is active */}
+            {isSassyMode && (
+              <QuickSassyReplies
+                variant="drawer"
+                disabled={appState === "processing" || appState === "speaking"}
+                onSelectReply={(reply) => {
+                  handleSelectSassyReply(reply);
+                  setShowHistory(false);
+                }}
+              />
+            )}
+
+            <div className="pt-2 border-t border-white/10 flex gap-2">
               <button
                 onClick={() => {
                   setMessages([]);
@@ -720,8 +1067,19 @@ export default function App() {
 
       {/* Controls */}
       <footer className="absolute bottom-0 left-0 w-full flex flex-col items-center justify-center pb-6 md:pb-8 z-20 shrink-0 gap-3">
-        {/* Quick Prompts for Jumon */}
-        {!isSessionActive && !showTextInput && messages.length <= 2 && (
+        {/* Quick Sassy Replies Bar (when in Sassy Mode) */}
+        <AnimatePresence>
+          {isSassyMode && (
+            <QuickSassyReplies
+              variant="inline"
+              disabled={appState === "processing" || appState === "speaking"}
+              onSelectReply={handleSelectSassyReply}
+            />
+          )}
+        </AnimatePresence>
+
+        {/* Quick Prompts for Jumon (when not in sassy mode and session is fresh) */}
+        {!isSassyMode && !isSessionActive && !showTextInput && messages.length <= 2 && (
           <div className="flex items-center gap-2 overflow-x-auto max-w-full px-4 py-1 scrollbar-hide">
             <button
               onClick={() => handleTextCommand("My name is JUMON And I am your creator!")}
@@ -730,10 +1088,10 @@ export default function App() {
               👑 "I am Jumon, your creator!"
             </button>
             <button
-              onClick={() => handleTextCommand("Tell me something sassy and witty in Bangla")}
+              onClick={() => handleTextCommand("Tell me a funny joke or witty comeback")}
               className="px-3 py-1.5 rounded-full bg-white/5 hover:bg-pink-500/20 border border-white/10 hover:border-pink-400/40 text-[12px] text-pink-200/90 whitespace-nowrap transition-colors"
             >
-              ✨ "Speak in Bangla"
+              ✨ "Tell me a joke"
             </button>
             <button
               onClick={() => handleTextCommand("Play a song on YouTube")}
@@ -772,7 +1130,7 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3 md:gap-4">
           <button
             onClick={toggleListening}
             className={`
